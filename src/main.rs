@@ -32,11 +32,22 @@ struct DetectCli {
     iou: f32,
 }
 
+/// Arguments for the camera capture test: grab a single frame and save it,
+/// discarding the first few frames so the sensor's exposure/white-balance can
+/// settle (warm up).
+#[derive(Debug)]
+struct CaptureCli {
+    camera: String,
+    output: PathBuf,
+    warmup: u32,
+}
+
 #[derive(Debug)]
 enum Command {
     Hunt(Cli),
     Serve(WebConfig),
     Detect(DetectCli),
+    Capture(CaptureCli),
 }
 
 impl Default for Cli {
@@ -67,6 +78,16 @@ impl Default for DetectCli {
     }
 }
 
+impl Default for CaptureCli {
+    fn default() -> Self {
+        Self {
+            camera: "/dev/cvi-usb-camera0".to_string(),
+            output: PathBuf::from("capture.jpg"),
+            warmup: 30,
+        }
+    }
+}
+
 fn main() {
     let command = match parse_cli(env::args().skip(1)) {
         Ok(command) => command,
@@ -93,6 +114,7 @@ fn main() {
             }
         }
         Command::Detect(cli) => run_detect(cli),
+        Command::Capture(cli) => run_capture(cli),
     }
 }
 
@@ -197,6 +219,56 @@ fn run_detect(cli: DetectCli) {
     }
 }
 
+fn run_capture(cli: CaptureCli) {
+    let mut camera = match UsbCamera::open(&cli.camera) {
+        Ok(camera) => {
+            let info = camera.info();
+            eprintln!(
+                "[capture] opened {}: {}x{} format={} connected={}",
+                cli.camera, info.width, info.height, info.format, info.connected
+            );
+            camera
+        }
+        Err(err) => {
+            eprintln!("[capture] failed to open {}: {err}", cli.camera);
+            std::process::exit(1);
+        }
+    };
+
+    // Discard the first few frames so the sensor's auto exposure / white
+    // balance can settle before we keep one.
+    for i in 0..cli.warmup {
+        if let Err(err) = camera.get_frame() {
+            eprintln!("[capture] warm-up frame {i} failed: {err}");
+            std::process::exit(1);
+        }
+    }
+    if cli.warmup > 0 {
+        eprintln!("[capture] discarded {} warm-up frame(s)", cli.warmup);
+    }
+
+    let frame = match camera.get_frame() {
+        Ok(frame) => frame,
+        Err(err) => {
+            eprintln!("[capture] failed to capture frame: {err}");
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(err) = std::fs::write(&cli.output, &frame.jpeg) {
+        eprintln!("[capture] failed to write {}: {err}", cli.output.display());
+        std::process::exit(1);
+    }
+
+    eprintln!(
+        "[capture] wrote {} byte(s) ({}x{}) to {}",
+        frame.jpeg.len(),
+        frame.width,
+        frame.height,
+        cli.output.display()
+    );
+}
+
 fn parse_cli(args: impl Iterator<Item = String>) -> Result<Command, String> {
     let mut args = args.peekable();
     match args.peek().map(String::as_str) {
@@ -207,6 +279,10 @@ fn parse_cli(args: impl Iterator<Item = String>) -> Result<Command, String> {
         Some("detect") => {
             args.next();
             parse_detect_cli(args).map(Command::Detect)
+        }
+        Some("capture") => {
+            args.next();
+            parse_capture_cli(args).map(Command::Capture)
         }
         _ => parse_hunt_cli(args).map(Command::Hunt),
     }
@@ -340,6 +416,38 @@ fn parse_detect_cli(args: impl Iterator<Item = String>) -> Result<DetectCli, Str
     Ok(cli)
 }
 
+fn parse_capture_cli(args: impl Iterator<Item = String>) -> Result<CaptureCli, String> {
+    let mut cli = CaptureCli::default();
+    let mut positional = 0;
+    let mut args = args.peekable();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-h" | "--help" => {
+                print_capture_usage();
+                std::process::exit(0);
+            }
+            "--camera" => cli.camera = take_value(&mut args, "--camera")?,
+            "-o" | "--out" => cli.output = PathBuf::from(take_value(&mut args, "--out")?),
+            "--warmup" => {
+                cli.warmup = take_value(&mut args, "--warmup")?
+                    .parse()
+                    .map_err(|_| "--warmup expects a non-negative integer".to_string())?;
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown capture option: {value}"))
+            }
+            value => {
+                match positional {
+                    0 => cli.output = PathBuf::from(value),
+                    _ => return Err(format!("unexpected capture argument: {value}")),
+                }
+                positional += 1;
+            }
+        }
+    }
+    Ok(cli)
+}
+
 fn take_value(
     args: &mut std::iter::Peekable<impl Iterator<Item = String>>,
     option: &str,
@@ -350,7 +458,13 @@ fn take_value(
 
 fn print_usage() {
     eprintln!(
-        "Usage:\n  akars <model.cvimodel> [--camera DEV] [--motor DEV] [--arm DEV] [--frames N] [--classes N] [--conf X] [--iou X]\n  akars serve [--listen HOST:PORT] [--motor DEV] [--arm DEV] [--mock]\n  akars detect <model.cvimodel> <image> [--out PATH] [--classes N] [--conf X] [--iou X]"
+        "Usage:\n  akars <model.cvimodel> [--camera DEV] [--motor DEV] [--arm DEV] [--frames N] [--classes N] [--conf X] [--iou X]\n  akars serve [--listen HOST:PORT] [--motor DEV] [--arm DEV] [--mock]\n  akars detect <model.cvimodel> <image> [--out PATH] [--classes N] [--conf X] [--iou X]\n  akars capture [output.jpg] [--camera DEV] [--out PATH] [--warmup N]"
+    );
+}
+
+fn print_capture_usage() {
+    eprintln!(
+        "Usage: akars capture [output.jpg] [--camera DEV] [--out PATH] [--warmup N]\n\nGrabs a single JPEG frame from the camera, discarding the first N frames so the\nsensor's auto exposure / white balance can settle (warm up).\n\nDefaults:\n  --camera /dev/cvi-usb-camera0\n  --out capture.jpg\n  --warmup 30"
     );
 }
 
