@@ -1,3 +1,4 @@
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -15,14 +16,24 @@ extern "C" int akars_mjpeg_to_rgb_planar(const uint8_t* jpeg,
                                           int dst_w,
                                           int dst_h,
                                           int* src_w,
-                                          int* src_h) {
+                                          int* src_h,
+                                          int64_t* decode_us,
+                                          int64_t* resize_us,
+                                          int64_t* pack_us) {
     if (!jpeg || jpeg_len == 0 || !dst || dst_w <= 0 || dst_h <= 0) {
         return -1;
     }
 
+    using clock = std::chrono::steady_clock;
+    auto since = [](clock::time_point a, clock::time_point b) {
+        return std::chrono::duration_cast<std::chrono::microseconds>(b - a).count();
+    };
+
     try {
         std::vector<uint8_t> encoded(jpeg, jpeg + jpeg_len);
+        const auto t0 = clock::now();
         cv::Mat bgr = cv::imdecode(encoded, cv::IMREAD_COLOR);
+        const auto t1 = clock::now();
         if (bgr.empty()) {
             return -2;
         }
@@ -42,6 +53,7 @@ extern "C" int akars_mjpeg_to_rgb_planar(const uint8_t* jpeg,
 
         cv::Mat canvas(dst_h, dst_w, CV_8UC3, cv::Scalar(0, 0, 0));
         resized.copyTo(canvas(cv::Rect(pad_left, pad_top, resized_w, resized_h)));
+        const auto t2 = clock::now();
 
         cv::Mat rgb;
         cv::cvtColor(canvas, rgb, cv::COLOR_BGR2RGB);
@@ -52,6 +64,11 @@ extern "C" int akars_mjpeg_to_rgb_planar(const uint8_t* jpeg,
         std::memcpy(dst + 0 * channel_size, channels[0].data, channel_size);
         std::memcpy(dst + 1 * channel_size, channels[1].data, channel_size);
         std::memcpy(dst + 2 * channel_size, channels[2].data, channel_size);
+        const auto t3 = clock::now();
+
+        if (decode_us) *decode_us = since(t0, t1);
+        if (resize_us) *resize_us = since(t1, t2);
+        if (pack_us) *pack_us = since(t2, t3);
         return 0;
     } catch (const std::exception&) {
         return -3;

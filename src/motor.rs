@@ -43,8 +43,10 @@ pub struct Motor {
 impl Motor {
     pub fn open(config: &MotorConfig) -> io::Result<Self> {
         let port = SerialPort::open(&config.device, 115200, true)?;
+        eprintln!("[dbg][motor] port opened, sleeping 100ms");
         thread::sleep(Duration::from_millis(100));
         port.flush();
+        eprintln!("[dbg][motor] flushed, sending CMD_INIT");
 
         let mut motor = Self {
             port: Some(port),
@@ -52,7 +54,9 @@ impl Motor {
             min_speed: config.min_speed,
         };
         motor.cmd_init();
+        eprintln!("[dbg][motor] CMD_INIT done, sending CMD_CONFIG");
         motor.cmd_config(config.ppr, config.pwm_freq);
+        eprintln!("[dbg][motor] CMD_CONFIG done");
         Ok(motor)
     }
 
@@ -89,8 +93,11 @@ impl Motor {
     }
 
     fn cmd_init(&mut self) {
+        eprintln!("[dbg][motor] cmd_init: send_frame");
         self.send_frame(CMD_INIT, &[]);
+        eprintln!("[dbg][motor] cmd_init: send_frame returned, recv_frame(500ms)");
         let _ = self.recv_frame(Duration::from_millis(500));
+        eprintln!("[dbg][motor] cmd_init: recv_frame returned");
     }
 
     fn cmd_config(&mut self, ppr: u16, pwm_freq: u16) {

@@ -141,6 +141,7 @@ fn run_hunt(cli: Cli) {
             std::process::exit(1);
         }
     };
+    eprintln!("[dbg] model opened, opening motor {} ...", cli.motor);
 
     let motor_config = MotorConfig {
         device: cli.motor.clone(),
@@ -153,6 +154,7 @@ fn run_hunt(cli: Cli) {
             std::process::exit(1);
         }
     };
+    eprintln!("[dbg] motor opened, opening arm {} ...", cli.arm);
 
     let arm = match Arm::open(&cli.arm, 115200) {
         Ok(arm) => arm,
@@ -161,6 +163,7 @@ fn run_hunt(cli: Cli) {
             std::process::exit(1);
         }
     };
+    eprintln!("[dbg] arm opened, entering tennis hunter ...");
 
     let config = RobotConfig {
         inference: InferenceConfig {

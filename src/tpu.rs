@@ -21,6 +21,22 @@ impl Default for InferenceConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct InferTiming {
+    /// JPEG decode (libjpeg) microseconds.
+    pub decode_us: i64,
+    /// resize + pad microseconds.
+    pub resize_us: i64,
+    /// BGR2RGB + split + memcpy microseconds.
+    pub pack_us: i64,
+    /// total preprocess (the C bridge call) microseconds.
+    pub preprocess_us: i64,
+    /// CVI_NN_Forward microseconds.
+    pub forward_us: i64,
+    /// detection parse + dequant + NMS + box correction microseconds.
+    pub postprocess_us: i64,
+}
+
 #[derive(Debug)]
 pub struct TpuError(String);
 
@@ -40,13 +56,14 @@ impl Error for TpuError {}
 
 #[cfg(akars_sg2002)]
 mod imp {
-    use super::{CameraFrame, Detection, InferenceConfig, TpuError};
+    use super::{CameraFrame, Detection, InferTiming, InferenceConfig, TpuError};
     use crate::detector::{correct_yolo_boxes, nms, parse_yolov8_output};
     use std::ffi::{c_char, c_int, c_void, CString};
     use std::os::unix::ffi::OsStrExt;
     use std::path::Path;
     use std::ptr;
     use std::slice;
+    use std::time::Instant;
 
     const CVI_FMT_FP32: i32 = 0;
     const CVI_FMT_BF16: i32 = 3;
@@ -119,6 +136,9 @@ mod imp {
             dst_h: i32,
             src_w: *mut i32,
             src_h: *mut i32,
+            decode_us: *mut i64,
+            resize_us: *mut i64,
+            pack_us: *mut i64,
         ) -> i32;
 
         fn akars_draw_detections(
@@ -211,6 +231,15 @@ mod imp {
             frame: &CameraFrame,
             config: InferenceConfig,
         ) -> Result<Vec<Detection>, TpuError> {
+            self.infer_timed(frame, config, None)
+        }
+
+        pub fn infer_timed(
+            &mut self,
+            frame: &CameraFrame,
+            config: InferenceConfig,
+            mut timing: Option<&mut InferTiming>,
+        ) -> Result<Vec<Detection>, TpuError> {
             let input_ptr = unsafe { CVI_NN_TensorPtr(self.input) as *mut u8 };
             if input_ptr.is_null() {
                 return Err(TpuError::new("input tensor pointer is null"));
@@ -218,6 +247,10 @@ mod imp {
 
             let mut decoded_w = 0;
             let mut decoded_h = 0;
+            let mut decode_us = 0i64;
+            let mut resize_us = 0i64;
+            let mut pack_us = 0i64;
+            let pre_start = Instant::now();
             let rc = unsafe {
                 akars_mjpeg_to_rgb_planar(
                     frame.jpeg.as_ptr(),
@@ -227,14 +260,19 @@ mod imp {
                     self.input_h,
                     &mut decoded_w,
                     &mut decoded_h,
+                    &mut decode_us,
+                    &mut resize_us,
+                    &mut pack_us,
                 )
             };
+            let preprocess_us = pre_start.elapsed().as_micros() as i64;
             if rc != 0 {
                 return Err(TpuError::new(format!(
                     "MJPEG decode/preprocess failed: {rc}"
                 )));
             }
 
+            let fwd_start = Instant::now();
             let rc = unsafe {
                 CVI_NN_Forward(
                     self.model,
@@ -244,10 +282,12 @@ mod imp {
                     self.output_num,
                 )
             };
+            let forward_us = fwd_start.elapsed().as_micros() as i64;
             if rc != CVI_RC_SUCCESS {
                 return Err(TpuError::new(format!("CVI_NN_Forward failed: {rc}")));
             }
 
+            let post_start = Instant::now();
             let mut detections = self.get_detections(config)?;
             nms(&mut detections, config.iou_threshold);
 
@@ -268,6 +308,18 @@ mod imp {
                 self.input_h,
                 self.input_w,
             );
+            let postprocess_us = post_start.elapsed().as_micros() as i64;
+
+            if let Some(t) = timing.as_deref_mut() {
+                *t = InferTiming {
+                    decode_us,
+                    resize_us,
+                    pack_us,
+                    preprocess_us,
+                    forward_us,
+                    postprocess_us,
+                };
+            }
             Ok(detections)
         }
 
@@ -387,7 +439,7 @@ mod imp {
 
 #[cfg(not(akars_sg2002))]
 mod imp {
-    use super::{CameraFrame, Detection, InferenceConfig, TpuError};
+    use super::{CameraFrame, Detection, InferTiming, InferenceConfig, TpuError};
     use std::path::Path;
 
     pub struct YoloModel;
@@ -403,6 +455,17 @@ mod imp {
             &mut self,
             _frame: &CameraFrame,
             _config: InferenceConfig,
+        ) -> Result<Vec<Detection>, TpuError> {
+            Err(TpuError::new(
+                "akars was built without SG2002 TPU/OpenCV runtime support",
+            ))
+        }
+
+        pub fn infer_timed(
+            &mut self,
+            _frame: &CameraFrame,
+            _config: InferenceConfig,
+            _timing: Option<&mut InferTiming>,
         ) -> Result<Vec<Detection>, TpuError> {
             Err(TpuError::new(
                 "akars was built without SG2002 TPU/OpenCV runtime support",
