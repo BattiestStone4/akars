@@ -52,7 +52,7 @@ impl fmt::Display for TpuError {
 
 impl Error for TpuError {}
 
-#[cfg(target_arch = "riscv64")]
+#[cfg(all(target_arch = "riscv64", not(akars_no_tpu)))]
 mod imp {
     use super::{CameraFrame, Detection, InferTiming, InferenceConfig, TpuError};
     use crate::detector::{correct_yolo_boxes, nms, parse_yolov8_output};
@@ -391,7 +391,7 @@ mod imp {
     }
 }
 
-#[cfg(not(target_arch = "riscv64"))]
+#[cfg(any(not(target_arch = "riscv64"), akars_no_tpu))]
 mod imp {
     use super::{CameraFrame, Detection, InferTiming, InferenceConfig, TpuError};
     use std::path::Path;

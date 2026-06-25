@@ -5,9 +5,20 @@ const DEFAULT_TPU_SDK_DIR: &str = "toolchains/tpu-sdk-sg200x";
 
 fn main() {
     println!("cargo:rerun-if-env-changed=AKARS_TPU_SDK_DIR");
+    println!("cargo:rerun-if-env-changed=AKARS_LINK_SG2002");
 
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     if target_arch != "riscv64" {
+        return;
+    }
+
+    // TPU SDK (cviruntime/cvikernel) 链接改为 opt-in:仅当显式设置
+    // AKARS_LINK_SG2002=1 时才链。serve / 摄像头路径不碰 TPU(UsbCamera 是纯
+    // ioctl),默认跳过,避免要求空的 TPU SDK submodule,产出零 cvitek 依赖的
+    // 二进制。hunt/detect 等需要 TPU 的路径设置 AKARS_LINK_SG2002=1 即恢复链接。
+    if env::var("AKARS_LINK_SG2002").as_deref() != Ok("1") {
+        // 通知 tpu.rs:不走 riscv64 CVI FFI 实现,用纯 Rust stub(无 extern CVI 符号)
+        println!("cargo:rustc-cfg=akars_no_tpu");
         return;
     }
 

@@ -363,6 +363,7 @@ fn parse_serve_cli(args: impl Iterator<Item = String>) -> Result<WebConfig, Stri
             }
             "--motor" => config.motor_device = take_value(&mut args, "--motor")?,
             "--arm" => config.arm_device = take_value(&mut args, "--arm")?,
+            "--camera" => config.camera_device = take_value(&mut args, "--camera")?,
             "--mock" => config.mock = true,
             value if value.starts_with('-') => {
                 return Err(format!("unknown serve option: {value}"))
@@ -482,6 +483,6 @@ fn print_detect_usage() {
 
 fn print_web_usage() {
     eprintln!(
-        "Usage: akars serve [--listen HOST:PORT] [--motor DEV] [--arm DEV] [--mock]\n\nDefaults:\n  --listen 0.0.0.0:8080\n  --motor /dev/ttyS3\n  --arm /dev/ttyS2"
+        "Usage: akars serve [--listen HOST:PORT] [--motor DEV] [--arm DEV] [--camera DEV] [--mock]\n\nDefaults:\n  --listen 0.0.0.0:8080\n  --motor /dev/ttyS3\n  --arm /dev/ttyS2\n  --camera /dev/cvi-usb-camera0"
     );
 }

@@ -1,19 +1,24 @@
 use crate::arm::Arm;
+use crate::camera::UsbCamera;
 use crate::motor::{Motor, MotorConfig};
 use axum::extract::{Query, State};
-use axum::response::Html;
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use std::io;
+use std::io::Cursor;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub struct WebConfig {
     pub listen: SocketAddr,
     pub motor_device: String,
     pub arm_device: String,
+    pub camera_device: String,
     pub mock: bool,
 }
 
@@ -23,6 +28,7 @@ impl Default for WebConfig {
             listen: SocketAddr::from(([0, 0, 0, 0], 8080)),
             motor_device: "/dev/ttyS3".to_string(),
             arm_device: "/dev/ttyS2".to_string(),
+            camera_device: "/dev/cvi-usb-camera0".to_string(),
             mock: false,
         }
     }
@@ -32,6 +38,8 @@ impl Default for WebConfig {
 struct AppState {
     config: WebConfig,
     hardware: Arc<Mutex<HardwareState>>,
+    /// USB 摄像头:懒打开(首次取帧时在 spawn_blocking 里 open),避免阻塞 serve 启动。
+    camera: Arc<Mutex<Option<UsbCamera>>>,
 }
 
 struct HardwareState {
@@ -97,6 +105,7 @@ pub async fn serve(config: WebConfig) -> io::Result<()> {
     let app_state = AppState {
         config: config.clone(),
         hardware: Arc::new(Mutex::new(hardware)),
+        camera: Arc::new(Mutex::new(None)),
     };
 
     let app = Router::new()
@@ -106,6 +115,7 @@ pub async fn serve(config: WebConfig) -> io::Result<()> {
         .route("/api/drive", post(drive))
         .route("/api/arm/action", post(arm_action))
         .route("/api/reconnect", post(reconnect))
+        .route("/api/camera/frame", get(camera_frame))
         .with_state(app_state);
 
     eprintln!("[web] listening on http://{}", config.listen);
@@ -117,6 +127,75 @@ pub async fn serve(config: WebConfig) -> io::Result<()> {
 
 async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
+}
+
+/// 取一帧 USB 摄像头画面,返回 image/jpeg。
+///
+/// open/get_frame 是阻塞 ioctl,放进 spawn_blocking + timeout 跑。关键:
+/// 用 take+put-back 模式避免在阻塞操作期间持有 Mutex 锁——timeout 不能杀死线程,
+/// 若锁被卡在 ISO 传输里的线程占着,后续请求会永久死锁。
+async fn camera_frame(State(state): State<AppState>) -> Response {
+    let camera = state.camera.clone();
+    let device = state.config.camera_device.clone();
+
+    // 短暂持锁:仅打开/取出 camera,不横跨 get_frame 阻塞操作
+    let mut cam = {
+        let mut guard = camera.lock().unwrap();
+        if guard.is_none() {
+            match UsbCamera::open(&device) {
+                Ok(c) => *guard = Some(c),
+                Err(e) => {
+                    return (StatusCode::SERVICE_UNAVAILABLE, format!("camera open: {e}"))
+                        .into_response();
+                }
+            }
+        }
+        guard.take().unwrap()
+    };
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || -> io::Result<(Vec<u8>, UsbCamera)> {
+            let frame = cam.get_frame()?;
+            // JPEG 缩放到 320x240:原帧 200-300KB,缩小后 ~15-25KB,
+            // 1-bit SDIO WiFi 扛得住,不触发 flow ctrl timeout
+            let out = match image::load_from_memory(&frame.jpeg) {
+                Ok(img) => {
+                    let small = img.resize(320, 240, image::imageops::FilterType::Nearest);
+                    let mut buf = Cursor::new(Vec::new());
+                    small
+                        .write_to(&mut buf, image::ImageFormat::Jpeg)
+                        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                    buf.into_inner()
+                }
+                Err(_) => {
+                    // 不是有效 JPEG,原样返回
+                    frame.jpeg
+                }
+            };
+            Ok((out, cam))
+        }),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(Ok((jpeg, cam_back)))) => {
+            // 成功:放回 camera 供下帧复用
+            *state.camera.lock().unwrap() = Some(cam_back);
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg"));
+            headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            (StatusCode::OK, headers, jpeg).into_response()
+        }
+        _ => {
+            // 失败/超时/panic:camera 已 drop,下次请求重新 open
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "camera frame failed or timed out, retry to reopen",
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
@@ -606,6 +685,47 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .actions, .inline { grid-template-columns: 1fr; }
       .row { grid-template-columns: 1fr; }
     }
+    .cam-wrap {
+      position: relative;
+      width: 100%;
+      background: #000;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      aspect-ratio: 4 / 3;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .cam-wrap img.cam {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+    .cam-overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      font-size: 13px;
+      pointer-events: none;
+      text-align: center;
+      padding: 8px;
+    }
+    .cam-controls {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      margin-top: 10px;
+      font-size: 13px;
+      color: var(--muted);
+      flex-wrap: wrap;
+    }
+    .cam-fps b { color: var(--text); font-size: 15px; }
+    .cam-info { min-width: 0; overflow-wrap: anywhere; }
   </style>
 </head>
 <body>
@@ -646,6 +766,19 @@ const INDEX_HTML: &str = r#"<!doctype html>
     </section>
 
     <div class="stack">
+      <section>
+        <h2>摄像头</h2>
+        <div class="cam-wrap">
+          <img id="cam" alt="摄像头画面" class="cam">
+          <div class="cam-overlay" id="cam-overlay">未开始</div>
+        </div>
+        <div class="cam-controls">
+          <button id="cam-toggle" class="primary" onclick="toggleCam()">开始</button>
+          <span class="cam-fps">FPS: <b id="cam-fps">0</b></span>
+          <label>间隔 <input id="cam-ival" type="number" min="100" max="5000" value="500" step="100" style="width:70px"> ms</label>
+          <span class="cam-info" id="cam-info"></span>
+        </div>
+      </section>
       <section>
         <h2>机械臂</h2>
         <div class="actions">
@@ -785,6 +918,65 @@ const INDEX_HTML: &str = r#"<!doctype html>
 
     refresh();
     setInterval(refresh, 1000);
+
+    // ===== 摄像头:取帧循环 + FPS 统计,用于测画面流畅程度 =====
+    let camRunning = false;
+    let camTimer = null;
+    let camFrames = 0;
+    let camLastFpsTime = 0;
+    let camObjectUrl = null;
+
+    async function fetchCamFrame() {
+      try {
+        const resp = await fetch("/api/camera/frame", {cache: "no-store"});
+        if (!resp.ok) {
+          const text = await resp.text();
+          $("cam-overlay").textContent = text || ("HTTP " + resp.status);
+          $("cam-info").textContent = "";
+          return;
+        }
+        const blob = await resp.blob();
+        if (camObjectUrl) URL.revokeObjectURL(camObjectUrl);
+        camObjectUrl = URL.createObjectURL(blob);
+        $("cam").src = camObjectUrl;
+        $("cam-overlay").textContent = "";
+        camFrames++;
+        const now = performance.now();
+        if (camLastFpsTime === 0) camLastFpsTime = now;
+        if (now - camLastFpsTime >= 1000) {
+          $("cam-fps").textContent = (camFrames * 1000 / (now - camLastFpsTime)).toFixed(1);
+          camFrames = 0;
+          camLastFpsTime = now;
+        }
+      } catch (e) {
+        $("cam-overlay").textContent = "取帧失败: " + e;
+      }
+    }
+
+    async function camLoop() {
+      if (!camRunning) return;
+      await fetchCamFrame();
+      if (camRunning) camTimer = setTimeout(camLoop, Number($("cam-ival").value) || 500);
+    }
+
+    function toggleCam() {
+      const btn = $("cam-toggle");
+      if (camRunning) {
+        camRunning = false;
+        if (camTimer) { clearTimeout(camTimer); camTimer = null; }
+        btn.textContent = "开始";
+        btn.classList.remove("stop");
+        $("cam-overlay").textContent = "已停止";
+      } else {
+        camRunning = true;
+        camFrames = 0;
+        camLastFpsTime = 0;
+        btn.textContent = "停止";
+        btn.classList.add("stop");
+        $("cam-overlay").textContent = "连接中";
+        camLoop();
+      }
+    }
   </script>
 </body>
 </html>"#;

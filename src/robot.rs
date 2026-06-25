@@ -55,14 +55,14 @@ const CENTER_MARGIN: i32 = 35;
 const K_TURN_PULSE: f32 = 5000.0;
 const TURN_PULSE_MAX_US: u64 = 500_000;
 const GRAB_AREA_MAX: f32 = 0.55;
-const CHASE_SPEED: i32 = 56;
-const TURN_SPEED: i32 = 18;
-const IDLE_SPEED: i32 = 18;
+const CHASE_SPEED: i32 = 5;
+const TURN_SPEED: i32 = 5;
+const IDLE_SPEED: i32 = 5;
 const TURN_PULSE_MIN_US: u64 = 75_000;
 const GRAB_CONFIRM_THRESHOLD: i32 = 5;
-const BACKWARD_SPEED: i32 = 18;
+const BACKWARD_SPEED: i32 = 5;
 const BACKWARD_PULSE_US: u64 = 200_000;
-const GRAB_LEFT_TURN_SPEED: i32 = 18;
+const GRAB_LEFT_TURN_SPEED: i32 = 5;
 const GRAB_LEFT_TURN_US: u64 = 150_000;
 const GRAB_LEFT_TURN_COUNT: i32 = 4;
 
@@ -136,14 +136,14 @@ pub fn run_tennis_hunter(
             timing.postprocess_us as f32 / 1000.0,
         );
 
-        // handle_detections(
-        //     &detections,
-        //     frame.width as i32,
-        //     frame.height as i32,
-        //     &mut robot,
-        //     &mut motor,
-        //     &mut arm,
-        // );
+        handle_detections(
+            &detections,
+            frame.width as i32,
+            frame.height as i32,
+            &mut robot,
+            &mut motor,
+            &mut arm,
+        );
 
         let frame_time = frame_start.elapsed();
         total_time += frame_time;

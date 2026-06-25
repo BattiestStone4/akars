@@ -56,10 +56,9 @@ pub struct UsbCamera {
 
 impl UsbCamera {
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        // StarryOS open 不支持 O_NOCTTY + write(false 避免 EISDIR)
         let file = std::fs::OpenOptions::new()
             .read(true)
-            .write(true)
-            .custom_flags(linux::O_NOCTTY)
             .open(path.as_ref())?;
 
         ioctl_no_arg(file.as_raw_fd(), CVI_CAMERA_IOCTL_INIT)?;
