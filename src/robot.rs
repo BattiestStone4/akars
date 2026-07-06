@@ -52,19 +52,22 @@ impl Default for RobotState {
 const REFERENCE_FRAME_WIDTH: f32 = 640.0;
 const GRAB_AREA: f32 = 0.40;
 const CENTER_MARGIN: i32 = 35;
+/// 抓取瞄准偏置:把球的目标位置设在画面中心右侧 N 像素,对准夹爪的物理偏置
+/// (正=偏右,负=偏左)。取代旧的"居中后盲左转"。参考 aka0 STOP_CENTER_OFFSET=120。
+const GRAB_CENTER_OFFSET: i32 = -100;
 const K_TURN_PULSE: f32 = 5000.0;
-const TURN_PULSE_MAX_US: u64 = 500_000;
+const TURN_PULSE_MAX_US: u64 = 400_000;
 const GRAB_AREA_MAX: f32 = 0.55;
-const CHASE_SPEED: i32 = 5;
-const TURN_SPEED: i32 = 3;
-const IDLE_SPEED: i32 = 5;
-const TURN_PULSE_MIN_US: u64 = 75_000;
+const CHASE_SPEED: i32 = 7;
+const TURN_SPEED: i32 = 4;
+const IDLE_SPEED: i32 = 4;
+const TURN_PULSE_MIN_US: u64 = 300_000;
 const GRAB_CONFIRM_THRESHOLD: i32 = 5;
-const BACKWARD_SPEED: i32 = 5;
+const BACKWARD_SPEED: i32 = 4;
 const BACKWARD_PULSE_US: u64 = 200_000;
 const GRAB_LEFT_TURN_SPEED: i32 = 3;
 const GRAB_LEFT_TURN_US: u64 = 150_000;
-const GRAB_LEFT_TURN_COUNT: i32 = 4;
+const GRAB_LEFT_TURN_COUNT: i32 = 0;
 
 pub fn install_signal_handlers() {
     unsafe {
@@ -197,7 +200,7 @@ fn handle_detections(
     let image_area = (image_w.max(1) * image_h.max(1)) as f32;
     let area_ratio = (best.bbox.w * best.bbox.h) / image_area;
     let ball_cx = best.bbox.x as i32;
-    let center = image_w / 2;
+    let center = image_w / 2 + GRAB_CENTER_OFFSET;
     let center_margin = scaled_center_margin(image_w);
     let offset = ball_cx - center;
     let centered = offset.abs() <= center_margin;
